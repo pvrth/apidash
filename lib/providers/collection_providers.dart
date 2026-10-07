@@ -111,6 +111,7 @@ class CollectionStateNotifier
   final HiveHandler hiveHandler;
   final baseHttpResponseModel = const HttpResponseModel();
   final Map<String, Timer> _appHeartbeatTimers = {};
+  int _reconnectAttempts = 0;
 
   @override
   void dispose() {
@@ -843,6 +844,8 @@ class CollectionStateNotifier
           ),
         ),
       };
+      // Reset reconnect attempt counter on successful connect
+      _reconnectAttempts = 0;
 
       _startMessageHeartbeat(requestId, currentWs);
 
@@ -922,12 +925,36 @@ class CollectionStateNotifier
             );
             final latestReq = state?[requestId];
             if (latestReq != null) {
-              _connectWebSocket(
-                requestId,
-                latestReq,
-                updatedWs,
-                historyId: historyId,
-              );
+              _reconnectAttempts++;
+              // Exponential backoff: 1s, 2s, 4s, 8s, 16s...
+              final delay =
+                  Duration(milliseconds: 1000 * (1 << _reconnectAttempts));
+              if (_reconnectAttempts >= 5) {
+                // Max attempts reached — stop reconnecting
+                _stopMessageHeartbeat(requestId);
+                update(
+                  id: requestId,
+                  isStreaming: false,
+                  wsRequestModel: ws.copyWith(
+                    messageHistory: [...ws.messageHistory, reconnMsg],
+                  ),
+                );
+                if (historyId != null) {
+                  _updateWebSocketHistoryRecord(
+                    historyId,
+                    ws.copyWith(messageHistory: [...ws.messageHistory, reconnMsg]),
+                  );
+                }
+              } else {
+                // Wait with backoff, then reconnect
+                await Future.delayed(delay);
+                _connectWebSocket(
+                  requestId,
+                  latestReq,
+                  updatedWs,
+                  historyId: historyId,
+                );
+              }
             }
           } else {
             final discMsg = WebSocketMessage(
